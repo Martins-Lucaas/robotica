@@ -15,10 +15,7 @@ class Kalman {
       R_measure = 0.03;
       angle = 0;
       bias = 0;
-      P[0][0] = 0;
-      P[0][1] = 0;
-      P[1][0] = 0;
-      P[1][1] = 0;
+      P[0][0] = P[0][1] = P[1][0] = P[1][1] = 0;
     }
 
     double getAngle(double newAngle, double newRate, double dt) {
@@ -30,7 +27,7 @@ class Kalman {
       P[1][0] -= dt * P[1][1];
       P[1][1] += Q_bias * dt;
 
-      double S = P[0][0] + R_measure;
+      double S  = P[0][0] + R_measure;
       double K0 = P[0][0] / S;
       double K1 = P[1][0] / S;
 
@@ -57,32 +54,52 @@ class Kalman {
 Kalman kalmanX;
 Kalman kalmanY;
 
+// ---------- LED RGB ----------
+const uint8_t LED_R_PIN = 9;   // Anodo do vermelho
+const uint8_t LED_G_PIN = 10;    // Anodo do verde
+const uint8_t LED_B_PIN = 8;    // Anodo do azul (não usado aqui)
+
+inline void setLED(bool r, bool g, bool b) {
+  digitalWrite(LED_R_PIN, r ? HIGH : LOW);
+  digitalWrite(LED_G_PIN, g ? HIGH : LOW);
+  digitalWrite(LED_B_PIN, b ? HIGH : LOW);
+}
+// --------------------------------
+
 unsigned long previousTime = 0;
 double yawAngle = 0;
-const float PI_F = 3.14159265358979323846;
+const double PI_F = 3.14159265358979323846;
 
-double initialRoll = 0;
+double initialRoll  = 0;
 double initialPitch = 0;
 
-double lastRollRelative = 0;
-double horizontalAngle = 90.0; // começa de 90°
+double lastRollRelative  = 0;
+double horizontalAngle   = 90.0;   // começa em 90°
 
 void setup() {
   Serial.begin(115200);
   Wire.begin();
 
+  // Configura pinos do LED
+  pinMode(LED_R_PIN, OUTPUT);
+  pinMode(LED_G_PIN, OUTPUT);
+  pinMode(LED_B_PIN, OUTPUT);
+
+  // Estado inicial – desconectado (vermelho)
+  setLED(true, false, false);
+
   mpu.initialize();
+
   if (!mpu.testConnection()) {
-    Serial.println("Erro ao conectar com o MPU6050!");
-    while (1);
+    Serial.println("Erro ao conectar com o MPU6050! (vermelho fixo)");
+    return;                       // mantém LED vermelho e sai do setup
   }
 
-  Serial.println("MPU6050 conectado com sucesso.");
+  // Conectando (amarelo)
+  setLED(true, true, false);
+  Serial.println("MPU6050 conectado. Calibrando posição inicial...");
 
-  delay(1000); // Estabilização
-  Serial.println("Calibrando posição inicial...");
-
-  // Média dos primeiros 100 valores para referência
+  // --------- Calibração inicial ---------
   for (int i = 0; i < 100; i++) {
     int16_t ax, ay, az, gx, gy, gz;
     mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
@@ -91,27 +108,36 @@ void setup() {
     double AccY = ay / 16384.0;
     double AccZ = az / 16384.0;
 
-    double rollAcc  = atan2(AccY, AccZ) * 180.0 / PI_F;
-    double pitchAcc = atan2(-AccX, sqrt(AccY * AccY + AccZ * AccZ)) * 180.0 / PI_F;
-
-    initialRoll += rollAcc;
-    initialPitch += pitchAcc;
+    initialRoll  += atan2(AccY, AccZ) * 180.0 / PI_F;
+    initialPitch += atan2(-AccX, sqrt(AccY * AccY + AccZ * AccZ)) * 180.0 / PI_F;
 
     delay(5);
   }
-
-  initialRoll /= 100.0;
+  initialRoll  /= 100.0;
   initialPitch /= 100.0;
 
-  Serial.print("Referência inicial definida. Roll: ");
+  Serial.print("Referência definida. Roll: ");
   Serial.print(initialRoll);
   Serial.print(" | Pitch: ");
   Serial.println(initialPitch);
+
+  // Pronto (verde)
+  setLED(false, true, false);
 
   previousTime = millis();
 }
 
 void loop() {
+  // Verifica se o sensor continua respondendo; se cair, volta para vermelho
+  if (!mpu.testConnection()) {
+    setLED(true, false, false);   // vermelho
+    Serial.println("MPU6050 desconectado!");
+    delay(500);
+    return;
+  } else {
+    setLED(true, false, true);   // garante verde durante operação normal
+  }
+
   unsigned long currentTime = millis();
   double dt = (currentTime - previousTime) / 1000.0;
   previousTime = currentTime;
@@ -132,40 +158,39 @@ void loop() {
 
   double roll  = kalmanX.getAngle(rollAcc, GyroX, dt);
   double pitch = kalmanY.getAngle(pitchAcc, GyroY, dt);
-  yawAngle += GyroZ * dt;
-  double yaw = yawAngle;
+  yawAngle    += GyroZ * dt;
 
-  // Corrige os ângulos com base na posição inicial
-  double rollRelative = roll - initialRoll;
+  // Corrige ângulos relativos
+  double rollRelative  = roll  - initialRoll;
   double pitchRelative = pitch - initialPitch;
 
-  // ===== HORIZONTAL acumulado (-180° a +180°) =====
+  // ---- Ângulo Horizontal acumulado ----
   double deltaRoll = rollRelative - lastRollRelative;
   lastRollRelative = rollRelative;
 
   horizontalAngle += deltaRoll;
   horizontalAngle = constrain(horizontalAngle, 0, 180.0);
 
-  // ===== VERTICAL (mapeado de -5 a 5 com zona morta) =====
-  const float angleMin = -10.0;
-  const float angleMax = 10.0;
-  const float deadZone = 3.0;
+  // ---- Ângulo Vertical com zona morta ----
+  const float ANG_MIN = -10.0;
+  const float ANG_MAX =  10.0;
+  const float DEAD    =   3.0;
 
-  auto mapWithDeadZone = [&](double angle) {
-    if (abs(angle) < deadZone) return 0.0;
-    angle = constrain(angle, angleMin, angleMax);
-    return (angle / angleMax) * 5.0;
+  auto mapDead = [&](double val) -> double {
+    if (fabs(val) < DEAD) return 0.0;
+    val = constrain(val, ANG_MIN, ANG_MAX);
+    return (val / ANG_MAX) * 5.0;      // −5 a +5
   };
 
-  int vertical = (int)mapWithDeadZone(pitchRelative);
+  int vertical = static_cast<int>(mapDead(pitchRelative));
 
-  // ===== SAÍDA SERIAL =====
+  // ---- Saída Serial ----
   Serial.print("HorizontalAngle: ");
   Serial.print(horizontalAngle, 1);
   Serial.print("° | Vertical: ");
   Serial.print(vertical);
   Serial.print(" | Yaw: ");
-  Serial.println(yaw, 1);
+  Serial.println(yawAngle, 1);
 
   delay(100);
 }
