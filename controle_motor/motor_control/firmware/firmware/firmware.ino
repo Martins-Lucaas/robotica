@@ -4,8 +4,8 @@
 #include <ArduinoJson.h>
 #include <RoboCore_Vespa.h>
 
-const char* ssid = "Vespa_S1";
-const char* password = "12345678";
+const char* ssid = "Martins 6";
+const char* password = "17031998";
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
